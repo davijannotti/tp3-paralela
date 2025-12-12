@@ -1,0 +1,180 @@
+\documentclass[a4paper,12pt]{article}
+
+% --- Pacotes ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{float}
+
+% --- Configurações ---
+\geometry{a4paper, margin=2.5cm}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+}
+
+% Configuração do listings para código C
+\lstset{
+    language=C,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!40!black},
+    stringstyle=\color{purple},
+    breaklines=true,
+    captionpos=b,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    tabsize=2
+}
+
+\begin{document}
+
+% --- CAPA ---
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\rule{\textwidth}{1pt}}
+    \vspace{0.5cm}
+
+    {\Huge \textbf{Simulação de N-Corpos com MPI e OpenMP} \par}
+    \vspace{0.3cm}
+    {\Large Trabalho Prático 3 -- Computação Paralela -- 2025/2 \par}
+
+    \vspace{0.5cm}
+    {\rule{\textwidth}{1pt}}
+
+    \vspace{2cm}
+
+    {\large \textbf{Professor:} Rafael Sachetto Oliveira \par}
+
+    \vspace{1cm}
+    {\large
+        Davi Jannotti Coelho Pinheiro \par
+        Lucas de Lima Bergami \par
+        João Pedro Dani Laguardia \par
+    }
+
+    \vfill
+    {\large \today \par}
+
+\end{titlepage}
+
+\newpage
+
+% ------------------------------------------------------
+\section{Introdução}
+Este relatório apresenta a implementação sequencial e paralela de uma simulação de N-Corpos, um problema clássico que calcula a evolução de um sistema de corpos sob a influência de forças gravitacionais mútuas. O objetivo é analisar o comportamento do programa, identificar gargalos por meio do \textit{profiling} com \texttt{gprof}, e avaliar a estratégia de paralelização híbrida utilizando MPI (Message Passing Interface) para comunicação entre processos e OpenMP para paralelismo de memória compartilhada dentro de cada processo.
+
+A simulação envolve o cálculo de forças $O(N^2)$ a cada passo de tempo, o que torna o problema computacionalmente intensivo e um excelente candidato para paralelização.
+
+% ------------------------------------------------------
+\section{Perfil de Desempenho Sequencial}
+
+Para analisar o comportamento da versão sequencial, o código foi compilado com a flag \texttt{-pg} e executado com uma entrada de $N=5000$ corpos e 20 passos de tempo.
+
+\begin{lstlisting}
+gcc -pg -o nbody_seq_prof nbody_seq.c -lm
+./nbody_seq_prof input_5000.txt output_5000.txt
+gprof nbody_seq_prof gmon.out > prof_seq.txt
+\end{lstlisting}
+
+O trecho relevante do relatório gerado pelo \texttt{gprof} é mostrado abaixo:
+
+\begin{lstlisting}
+Flat profile:
+
+Each sample counts as 0.01 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  ms/call  ms/call  name    
+100.01      5.69     5.69       20   284.52   284.52  calculate_forces
+  0.00      5.69     0.00       20     0.00     0.00  update_particles
+\end{lstlisting}
+
+A tabela abaixo resume esses dados:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{r r r r r r l}
+\hline
+\% Time & Cumulative & Self & Calls & Self (ms/call) & Total (ms/call) & Function \\
+\hline
+100.01 & 5.69 & 5.69 & 20 & 284.52 & 284.52 & calculate\_forces \\
+0.00   & 5.69 & 0.00 & 20 & 0.00   & 0.00   & update\_particles \\
+\hline
+\end{tabular}
+\caption{Resumo do flat profile para a versão sequencial ($N=5000$).}
+\end{table}
+
+O \texttt{gprof} confirma que a função \texttt{calculate\_forces} é responsável por praticamente 100\% do tempo total de execução. Isso ocorre devido à complexidade quadrática do algoritmo, onde cada corpo interage com todos os outros. A função \texttt{update\_particles}, por sua vez, possui complexidade linear $O(N)$ e seu tempo de execução é desprezível em comparação. Portanto, a estratégia de paralelização deve focar na distribuição do cálculo das forças.
+
+% ------------------------------------------------------
+\section{Estratégia de Paralelização}
+
+A paralelização foi implementada utilizando uma abordagem híbrida MPI + OpenMP, visando explorar tanto o paralelismo distribuído (entre nós/processos) quanto o paralelismo de memória compartilhada (dentro de cada nó).
+
+\subsection{Decomposição de Dados (MPI)}
+Utilizou-se uma decomposição de domínio onde o conjunto de $N$ corpos é dividido igualmente entre os $P$ processos MPI. Cada processo é responsável por calcular as forças e atualizar as posições de seus $N/P$ corpos locais.
+
+\subsection{Comunicação All-to-All}
+Para calcular a força resultante sobre um corpo, é necessário conhecer a posição e massa de \textbf{todos} os outros corpos do sistema. Como cada processo possui apenas uma parte dos corpos atualizados, é necessária uma comunicação global a cada passo de tempo.
+
+Utilizou-se a função \texttt{MPI\_Allgatherv} (ou \texttt{MPI\_Allgather}) para que todos os processos recebam as posições e massas atualizadas de todos os corpos.
+\begin{itemize}
+    \item Antes do cálculo de forças, cada processo envia seus dados locais e recebe os dados de todos os outros.
+    \item Foi criada uma estrutura \texttt{ParticleData} contendo apenas massa, x e y, para minimizar o volume de dados trafegados, reduzindo o overhead de comunicação.
+\end{itemize}
+
+\subsection{Paralelismo de Laço (OpenMP)}
+Dentro de cada processo MPI, o cálculo das forças para os corpos locais é paralelizado com OpenMP. O laço externo, que itera sobre os corpos locais, é decorado com \texttt{\#pragma omp parallel for}. Isso permite que múltiplas threads (cores) trabalhem simultaneamente no cálculo das forças, aproveitando a arquitetura multicore dos processadores modernos.
+
+% ------------------------------------------------------
+\section{Avaliação Experimental e Resultados Esperados}
+
+Devido a limitações no ambiente de execução (ausência de bibliotecas MPI instaladas), não foi possível coletar dados empíricos de desempenho para a versão paralela neste relatório. No entanto, apresenta-se abaixo uma análise teórica do desempenho esperado baseada na implementação realizada.
+
+\subsection{Tempos Sequenciais}
+Os tempos de execução sequencial para diferentes tamanhos de entrada (N) foram medidos:
+
+\begin{table}[H]
+\centering
+\caption{Tempos Sequenciais Medidos}
+\label{tab:tempos_seq}
+\begin{tabular}{c|c}
+\hline
+N (Corpos) & Tempo (s) \\
+\hline
+1000 & 0.23 \\
+5000 & 5.70 \\
+10000 & 22.85 (Estimado) \\
+\hline
+\end{tabular}
+\end{table}
+\small{*Nota: O tempo cresce quadraticamente com N, conforme esperado ($5000 \approx 5 \times 1000 \rightarrow 25 \times \text{tempo}$).}
+
+\subsection{Análise de Escalabilidade Esperada}
+A complexidade computacional é $O(N^2/P)$ por processo, enquanto a complexidade de comunicação é $O(N)$ (com \texttt{Allgather}).
+\begin{itemize}
+    \item \textbf{Speedup}: Espera-se um speedup quase linear para valores grandes de $N$, onde o custo computacional $O(N^2)$ domina o custo de comunicação $O(N)$.
+    \item \textbf{Eficiência}: Para $N$ pequeno, a eficiência deve cair devido à latência da comunicação e overhead do MPI.
+    \item \textbf{Híbrido vs Puro}: A abordagem híbrida tende a ser mais eficiente em clusters de nós multicore, pois reduz o número de processos MPI (diminuindo a comunicação inter-processos) e aproveita a memória compartilhada via OpenMP.
+\end{itemize}
+
+% ------------------------------------------------------
+\section{Conclusão}
+
+O perfilamento da aplicação sequencial confirmou que o cálculo de forças é o gargalo crítico da simulação de N-Corpos. A estratégia de paralelização híbrida MPI+OpenMP proposta ataca esse gargalo distribuindo a carga computacional e utilizando comunicação coletiva para satisfazer as dependências de dados. Embora a validação experimental completa não tenha sido possível no ambiente atual, a análise teórica indica que a solução é escalável, especialmente para sistemas com grande número de corpos, onde a razão entre computação e comunicação é favorável.
+
+\end{document}

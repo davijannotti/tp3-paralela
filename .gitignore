@@ -1,0 +1,26 @@
+# Binaries
+nbody_seq
+nbody_par
+input_gen
+
+# Object files
+*.o
+
+# Input/Output data
+*.txt
+
+# LaTeX intermediate files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Archives
+*.zip
+*.tar.gz
+
+# Gprof
+gmon.out
